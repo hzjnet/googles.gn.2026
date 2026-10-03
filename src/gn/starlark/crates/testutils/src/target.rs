@@ -12,7 +12,7 @@ use allocative::Allocative;
 use attr::Attr;
 use starlark::{
     starlark_simple_value,
-    values::{Heap, ProvidesStaticType, StarlarkValue, Value, ValueLike},
+    values::{Heap, ProvidesStaticType, StarlarkValue, Value},
 };
 use starlark_derive::{starlark_value, NoSerialize};
 use types::{File, IPromiseToImplementStarlarkEqAndHash, Label, LabelRef, OutputType, TargetRef};
@@ -29,7 +29,7 @@ pub struct FakeTarget {
     /// A list of attributes.
     pub attrs: Vec<Attr>,
     pub output_type: Option<OutputType>,
-    pub rule: Option<&'static rule::FrozenRule<FakeEvalContext>>,
+    pub rule: Option<&'static rule::Rule<'static, FakeEvalContext>>,
     #[allocative(skip)]
     pub cxx_attrs: HashMap<String, Value<'static>>,
     /// Registered target dependencies.
@@ -133,7 +133,7 @@ impl Deref for FakeTargetRef {
 
 impl TargetRef for FakeTargetRef {
     type Cxx = FakeTarget;
-    type Rule = rule::FrozenRule<FakeEvalContext>;
+    type Rule = rule::Rule<'static, FakeEvalContext>;
     type Session = crate::FakeSession;
 
     fn label(&self) -> LabelRef<'_> {
@@ -156,8 +156,8 @@ impl TargetRef for FakeTargetRef {
         self.get().outputs.clone()
     }
 
-    fn target_out_dir(&self, prefix: &str, suffix: &str, _separator: &str) -> String {
-        format!("{prefix}$TOOLCHAIN/{suffix}$LABEL")
+    fn is_default_toolchain(&self) -> bool {
+        true
     }
 
     fn builtin_attrs<'v>(&self, _session: &Self::Session, _heap: &Heap<'v>) -> Vec<Value<'v>> {
