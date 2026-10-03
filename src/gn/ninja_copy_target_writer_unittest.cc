@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "gn/ninja_copy_target_writer.h"
+
 #include <algorithm>
 #include <sstream>
 
-#include "gn/ninja_copy_target_writer.h"
 #include "gn/substitution_list.h"
 #include "gn/target.h"
 #include "gn/test_with_scope.h"
@@ -208,10 +209,8 @@ TEST(NinjaCopyTargetWriter, NoSourcesInOutputs) {
     writer.Run();
 
     const char expected_linux[] =
-        "build phony/foo/bar.inputdeps: phony || phony/foo/action1 "
-        "phony/foo/action2\n"
-        "build action1.copy: copy action1.out | phony/foo/bar.inputdeps\n"
-        "build action2.copy: copy action2.out | phony/foo/bar.inputdeps\n"
+        "build action1.copy: copy action1.out || phony/foo/bar.harddeps\n"
+        "build action2.copy: copy action2.out || phony/foo/bar.harddeps\n"
         "\n"
         "build phony/foo/bar: phony action1.copy action2.copy\n";
     std::string out_str = out.str();
