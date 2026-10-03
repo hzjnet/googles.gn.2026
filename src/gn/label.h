@@ -5,10 +5,10 @@
 #ifndef TOOLS_GN_LABEL_H_
 #define TOOLS_GN_LABEL_H_
 
+#include <stddef.h>
+
 #include <string_view>
 #include <tuple>
-
-#include <stddef.h>
 
 #include "gn/source_dir.h"
 #include "gn/string_atom.h"
@@ -68,6 +68,11 @@ class Label {
   // not the default one. Normally the user only cares about the toolchain for
   // non-default ones, so this can make certain output more clear.
   std::string GetUserVisibleName(const Label& default_toolchain) const;
+
+  // Return true if this instance matches |other|. |default_toolchain| is
+  // used when either label doesn't have a toolchain suffix to ensure
+  // canonical and non-canonical labels are compared correctly.
+  bool Matches(const Label& other, const Label& default_toolchain) const;
 
   bool operator==(const Label& other) const {
     return hash_ == other.hash_ && name_.SameAs(other.name_) &&

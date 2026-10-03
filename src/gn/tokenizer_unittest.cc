@@ -2,11 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "gn/tokenizer.h"
+
 #include <stddef.h>
 
 #include "gn/input_file.h"
 #include "gn/token.h"
-#include "gn/tokenizer.h"
 #include "util/test/test.h"
 
 namespace {
@@ -160,6 +161,27 @@ TEST(Tokenizer, ByteOffsetOfNthLine) {
   input2[2] = 0;
   EXPECT_EQ(0u, Tokenizer::ByteOffsetOfNthLine(input2, 1));
   EXPECT_EQ(2u, Tokenizer::ByteOffsetOfNthLine(input2, 2));
+}
+
+TEST(Tokenizer, LocationRangeGetText) {
+  InputFile file(SourceFile("//test"));
+  file.SetContents("first line\nsecond line\nthird line");
+
+  // Entire first line
+  LocationRange first_line(Location(&file, 1, 1), Location(&file, 1, 11));
+  EXPECT_EQ(first_line.GetText(), "first line");
+
+  // Part of second line
+  LocationRange second_part(Location(&file, 2, 8), Location(&file, 2, 12));
+  EXPECT_EQ(second_part.GetText(), "line");
+
+  // Multi-line range
+  LocationRange multi_line(Location(&file, 1, 7), Location(&file, 2, 7));
+  EXPECT_EQ(multi_line.GetText(), "line\nsecond");
+
+  // Null range
+  LocationRange null_range;
+  EXPECT_TRUE(null_range.GetText().empty());
 }
 
 TEST(Tokenizer, Comments) {
