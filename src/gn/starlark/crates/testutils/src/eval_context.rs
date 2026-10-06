@@ -1,11 +1,15 @@
 // Copyright 2026 The Chromium Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-use std::{cell::UnsafeCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{RefCell, UnsafeCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 use attr::{Attr, EvalContext as AttrEvalContext, EvalContextAttrExt};
 use starlark::{
-    values::{FrozenValue, FrozenValueTyped, Heap, ProvidesStaticType, Value},
+    values::{FrozenValueTyped, Heap, ProvidesStaticType, Value},
     Result,
 };
 use types::{
@@ -64,7 +68,7 @@ pub struct FakeEvalContext {
     pub path_resolver: PathResolver,
     /// The fake rule state.
     #[allocative(skip)]
-    pub rule_state: UnsafeCell<CtxState<FakeTargetRef>>,
+    pub rule_state: RefCell<CtxState<FakeTargetRef>>,
     /// The fake scope.
     #[allocative(skip)]
     pub scope: UnsafeCell<FakeScope>,
@@ -93,7 +97,7 @@ impl FakeEvalContext {
             current_toolchain: target.toolchain().to_owned(),
             session,
             path_resolver: PathResolver::new_for_testing(),
-            rule_state: CtxState::new(target).into(),
+            rule_state: RefCell::new(CtxState::new(target)),
             scope: FakeScope::default().into(),
         }
     }
@@ -129,9 +133,10 @@ impl AttrEvalContext for FakeEvalContext {
         Ok(())
     }
 
-    fn require_rule_impl(&self) -> Result<&mut CtxState<<Self::Session as Session>::TargetRef>> {
-        // Safety: The eval context is single-threaded.
-        Ok(unsafe { &mut (*self.rule_state.get()) })
+    fn require_rule_impl(
+        &self,
+    ) -> Result<&RefCell<CtxState<<Self::Session as Session>::TargetRef>>> {
+        Ok(&self.rule_state)
     }
 }
 
@@ -165,7 +170,7 @@ impl EvalContextAttrExt for FakeEvalContext {
     fn register_target(
         &self,
         cxx_target: &'static FakeTarget,
-        rule: FrozenValue,
+        rule: Value<'static>,
         attrs: Vec<Attr>,
     ) -> Result<FakeTargetRef> {
         let target_ptr = cxx_target as *const FakeTarget;
@@ -175,7 +180,8 @@ impl EvalContextAttrExt for FakeEvalContext {
             .position(|t| std::ptr::eq(&**t, target_ptr))
             .expect("Registering target that was not created in this context");
         let mut target = targets.remove(idx);
-        let typed = FrozenValueTyped::<rule::FrozenRule<FakeEvalContext>>::new_err(rule)?;
+        let typed =
+            FrozenValueTyped::<'static, rule::Rule<'static, FakeEvalContext>>::new_err(rule)?;
         target.rule = typed.has_implementation().then(|| typed.as_ref());
         target.attrs = attrs;
         Ok(self.session.insert_target(*target))
