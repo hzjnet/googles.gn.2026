@@ -3,9 +3,7 @@
 // found in the LICENSE file.
 
 use allocative::Allocative;
-use starlark::values::{
-    AllocValue, Heap, ProvidesStaticType, StarlarkValue, Value, ValueLike as _,
-};
+use starlark::values::{AllocValue, Heap, ProvidesStaticType, StarlarkValue, Value};
 use starlark_derive::{starlark_value, NoSerialize};
 use types::{LabelRef, TargetRef as _};
 
@@ -20,6 +18,14 @@ impl PartialEq for TargetRef {
     }
 }
 impl Eq for TargetRef {}
+
+impl std::ops::Deref for TargetRef {
+    type Target = Target;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
 
 impl std::hash::Hash for TargetRef {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -58,6 +64,17 @@ impl<'v> StarlarkValue<'v> for TargetRef {
         self.hash(hasher);
         Ok(())
     }
+
+    fn at(&self, index: Value<'v>, heap: Heap<'v>) -> starlark::Result<Value<'v>> {
+        match self.providers().get(self, index, heap)? {
+            Some(val) => Ok(val),
+            None => Err(crate::errors::Error::MissingProvider(*self, index.to_string()).into()),
+        }
+    }
+
+    fn is_in(&self, index: Value<'v>) -> starlark::Result<bool> {
+        self.providers().contains(self, index)
+    }
 }
 
 impl<'v> AllocValue<'v> for TargetRef {
@@ -68,7 +85,7 @@ impl<'v> AllocValue<'v> for TargetRef {
 
 impl types::TargetRef for TargetRef {
     type Cxx = crate::bridge::CxxTarget;
-    type Rule = rule::FrozenRule<crate::eval_context::EvalContext>;
+    type Rule = rule::Rule<'static, crate::eval_context::EvalContext>;
     type Session = crate::Session;
 
     fn label(&self) -> LabelRef<'_> {
@@ -84,30 +101,20 @@ impl types::TargetRef for TargetRef {
     }
 
     fn outputs(&self) -> Vec<types::File> {
-        todo!()
-    }
-
-    fn target_out_dir(
-        &self,
-        toolchain_prefix: &str,
-        label_prefix: &str,
-        package_name_separator: &str,
-    ) -> String {
-        let mut out = String::new();
-        out.push_str(toolchain_prefix);
-        if !self.0.settings().is_default() {
-            out.push_str(self.toolchain().name());
-            out.push('/');
-        }
-        out.push_str(label_prefix);
-        out.push_str(self.label().package().as_source_relative());
-        out.push_str(package_name_separator);
-        out.push_str(self.label().name());
-        out
+        self.0
+            .cxx
+            .computed_outputs()
+            .iter()
+            .map(|f| f.to_rust())
+            .collect()
     }
 
     fn output_type(&self) -> Option<types::OutputType> {
         types::OutputType::from_u8(self.0.output_type())
+    }
+
+    fn is_default_toolchain(&self) -> bool {
+        self.0.settings().is_default()
     }
 
     fn builtin_attrs<'v>(&self, session: &Self::Session, heap: &Heap<'v>) -> Vec<Value<'v>> {

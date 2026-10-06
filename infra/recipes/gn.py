@@ -133,7 +133,14 @@ def RunSteps(api, repository):
     cipd_dir = api.path['start_dir'].join('cipd')
     pkgs = api.cipd.EnsureFile()
     pkgs.add_package('infra/ninja/${platform}', 'version:1.8.2')
-    rust_version = 'git_revisions:1ed2df61a19042f231709eb05d032ae9e2cb2084,7980fa07f3c3633504c617e05b31673b50565957'
+    # Rust CIPD packages are tagged with `git_revisions:<rust_commit>,<llvm_commit>`
+    # because they bundle an LLVM backend. We select the Rust toolchain that matches
+    # the LLVM revision of Clang's 'integration' ref at the time of updating.
+    #
+    # See:
+    # * https://chrome-infra-packages.appspot.com/p/fuchsia/third_party/rust/host
+    # * https://chrome-infra-packages.appspot.com/p/fuchsia/third_party/rust/target
+    rust_version = 'git_revisions:c26ce708de5d14682647895d2f3caf38f70b5aa6,3493720eca95cf844a8d7e58fdd12e0e5644e7d0'
     pkgs.add_package('fuchsia/third_party/rust/host/${platform}', rust_version)
     if api.platform.is_linux:
       pkgs.add_package('fuchsia/third_party/rust/target/x86_64-unknown-linux-gnu', rust_version)
@@ -255,6 +262,10 @@ def RunSteps(api, repository):
               '--enable-static',
               '--disable-syscall',
               '--disable-stats',
+              # Enable Transparent Huge Pages (THP) by default via madvise to reduce
+              # minor page faults and page table walk overhead during large generation
+              # tasks (e.g. saves ~54% minor faults and ~7% wall time on Chromium).
+              '--with-malloc-conf=thp:always',
             ]
             if platform == 'linux-arm64':
               configure_args.append('--with-lg-page=16')
