@@ -221,11 +221,15 @@ HeaderChecker::HeaderChecker(const BuildSettings* build_settings,
 HeaderChecker::~HeaderChecker() = default;
 
 bool HeaderChecker::Run(const std::vector<const Target*>& to_check,
+                        const std::vector<const Target*>& no_check_generated,
                         bool force_check,
                         std::vector<Violation>* violations) {
   std::unordered_set<const Target*> to_check_set(to_check.begin(),
                                                  to_check.end());
-  std::vector<FileInformation> files = FilesToCheck(to_check_set);
+  std::unordered_set<const Target*> no_check_generated_set(
+      no_check_generated.begin(), no_check_generated.end());
+  std::vector<FileInformation> files =
+      FilesToCheck(to_check_set, no_check_generated_set);
 
   WorkerPool pool;
   {
@@ -260,7 +264,8 @@ bool HeaderChecker::Run(const std::vector<const Target*>& to_check,
 }
 
 std::vector<HeaderChecker::FileInformation> HeaderChecker::FilesToCheck(
-    const std::unordered_set<const Target*>& to_check) const {
+    const std::unordered_set<const Target*>& to_check,
+    const std::unordered_set<const Target*>& no_check_generated) const {
   std::vector<FileInformation> files;
   files.reserve(file_map_.size());
 
@@ -282,10 +287,14 @@ std::vector<HeaderChecker::FileInformation> HeaderChecker::FilesToCheck(
         continue;
     }
 
+    // All generated files, including action outputs, are in the output dir.
+    const bool in_output_dir = IsFileInOutputDir(info.file);
+
     TargetVector targets_to_check;
     for (const auto& vect_i : info.targets) {
       if (vect_i.target->IsBinary() && to_check.contains(vect_i.target) &&
-          vect_i.target->check_includes()) {
+          vect_i.target->check_includes() &&
+          !(in_output_dir && no_check_generated.contains(vect_i.target))) {
         targets_to_check.push_back(vect_i);
       }
     }
@@ -374,7 +383,7 @@ void HeaderChecker::AddTargetToFileMap(const Target* target, FileMap* dest) {
   }
 }
 
-bool HeaderChecker::IsFileInOuputDir(const SourceFile& file) const {
+bool HeaderChecker::IsFileInOutputDir(const SourceFile& file) const {
   const std::string& build_dir = build_settings_->build_dir().value();
   return file.value().starts_with(build_dir);
 }
@@ -521,7 +530,7 @@ bool HeaderChecker::CheckFile(const TargetVector& targets,
   // target. These won't exist at checking time. Since we require all generated
   // files to be somewhere in the output tree, we can just check the name to
   // see if they should be skipped.
-  if (!check_generated_ && IsFileInOuputDir(file))
+  if (!check_generated_ && IsFileInOutputDir(file))
     return true;
 
   base::FilePath path = build_settings_->GetFullPath(file);
@@ -529,7 +538,7 @@ bool HeaderChecker::CheckFile(const TargetVector& targets,
   if (!base::ReadFileToString(path, &contents)) {
     // A missing (not yet) generated file is an acceptable problem
     // considering this code does not understand conditional includes.
-    if (IsFileInOuputDir(file))
+    if (IsFileInOutputDir(file))
       return true;
 
     for (const TargetInfo& from_target_info : targets) {
