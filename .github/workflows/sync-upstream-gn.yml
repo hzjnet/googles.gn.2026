@@ -36,7 +36,11 @@ jobs:
         run: git fetch upstream --prune --tags
       - name: Merge upstream
         run: git merge --no-edit "${{ matrix.upstream }}"
+      - name: Push main
+        if: matrix.base == 'main'
+        run: git push origin "HEAD:refs/heads/${{ matrix.base }}"
       - name: Create Pull Request
+        if: matrix.base != 'main'
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
