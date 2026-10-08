@@ -100,7 +100,8 @@ void NinjaTargetWriter::WriteOutputs(std::vector<OutputFile>&& outputs) const {
 std::string NinjaTargetWriter::RunAndWriteFile(
     const Target* target,
     ResolvedTargetData* resolved,
-    std::vector<OutputFile>* ninja_outputs) {
+    std::vector<OutputFile>* ninja_outputs,
+    bool* delayed_generated_file_write) {
   const Settings* settings = target->settings();
 
   ScopedTrace trace(TraceItem::TRACE_FILE_WRITE_NINJA,
@@ -109,6 +110,9 @@ std::string NinjaTargetWriter::RunAndWriteFile(
 
   if (g_scheduler->verbose_logging())
     g_scheduler->Log("Computing", target->label().GetUserVisibleName(true));
+
+  if (delayed_generated_file_write)
+    *delayed_generated_file_write = false;
 
   // It's ridiculously faster to write to a string and then write that to
   // disk in one operation than to use an fstream here.
@@ -161,6 +165,7 @@ std::string NinjaTargetWriter::RunAndWriteFile(
     NinjaGeneratedFileTargetWriter writer(target, rules);
     writer.SetResolvedTargetData(resolved);
     writer.SetNinjaOutputs(ninja_outputs);
+    writer.SetDelayedGeneratedFileWritePtr(delayed_generated_file_write);
     writer.Run();
   } else if (target->IsBinary()) {
     needs_file_write = true;
@@ -193,6 +198,7 @@ std::string NinjaTargetWriter::RunAndWriteFile(
   }
 
   WritePublicInputsStampOrPhony(target, resolved, rules);
+  WriteHardDepsStampOrPhony(target, resolved, rules);
 
   if (needs_file_write) {
     // Write the ninja file.
@@ -254,6 +260,113 @@ void NinjaTargetWriter::WritePublicInputsStampOrPhony(
 
   path_output.WriteFiles(out, deps);
   out << std::endl << std::endl;
+}
+
+namespace {
+
+// BUNDLE_DATA hard deps are only input deps of CREATE_BUNDLE targets, which
+// list them explicitly. See WriteInputDepsStampOrPhonyAndGetDep().
+bool IsListedHardDep(const Target* dep) {
+  return dep->output_type() != Target::BUNDLE_DATA &&
+         dep->has_dependency_output();
+}
+
+}  // namespace
+
+// static
+void NinjaTargetWriter::AppendHardDepsOutputs(
+    const Target* target,
+    const ResolvedTargetData& resolved,
+    std::vector<OutputFile>* outputs) {
+  // The iteration order of GetHardDeps() isn't deterministic, but this only
+  // depends on the set's contents.
+  const Target* single_hard_dep = nullptr;
+  for (const Target* hard_dep : resolved.GetHardDeps(target)) {
+    if (!IsListedHardDep(hard_dep))
+      continue;
+    if (single_hard_dep) {
+      outputs->push_back(
+          GetHardDepsOutputFile(target, target->settings()->build_settings()));
+      return;
+    }
+    single_hard_dep = hard_dep;
+  }
+  if (single_hard_dep)
+    outputs->push_back(single_hard_dep->dependency_output());
+}
+
+namespace {
+
+// Appends the ninja outputs representing hard dependencies for the given list
+// of direct |deps| of |target|, deduplicating the resulting |outputs|.
+// For each dep, if it (or |target|) is a direct hard_dep, its dependency output
+// is added directly; otherwise, if it forwards hard deps, its aggregated hard
+// deps output (at most one file/phony per dep) is appended.
+void AppendHardDepsOutputsForDeps(const Target* target,
+                                  base::span<const Target*> deps,
+                                  const ResolvedTargetData& resolved,
+                                  std::vector<OutputFile>* outputs) {
+  for (const Target* dep : deps) {
+    if (target->hard_dep() || dep->hard_dep()) {
+      if (IsListedHardDep(dep))
+        outputs->push_back(dep->dependency_output());
+    } else if (ResolvedTargetData::ForwardsHardDeps(dep)) {
+      NinjaTargetWriter::AppendHardDepsOutputs(dep, resolved, outputs);
+    }
+  }
+  std::sort(outputs->begin(), outputs->end());
+  outputs->erase(std::unique(outputs->begin(), outputs->end()), outputs->end());
+}
+
+}  // namespace
+
+// static
+void NinjaTargetWriter::WriteHardDepsStampOrPhony(const Target* target,
+                                                  ResolvedTargetData* resolved,
+                                                  std::ostream& out) {
+  std::unique_ptr<ResolvedTargetData> resolved_owned;
+  if (!resolved) {
+    resolved_owned = std::make_unique<ResolvedTargetData>();
+    resolved = resolved_owned.get();
+  }
+
+  const BuildSettings* build_settings = target->settings()->build_settings();
+  OutputFile output = GetHardDepsOutputFile(target, build_settings);
+  std::vector<OutputFile> self;
+  AppendHardDepsOutputs(target, *resolved, &self);
+  if (self.empty() || self[0] != output)
+    return;  // Fewer than two hard deps, nothing will refer to this rule.
+
+  // Keep in sync with ResolvedTargetData::ComputeHardDeps(). This produces
+  // the same set of targets, but refers to the hard deps rules of deps
+  // instead of flattening them. Because dependents refer to this rule, only
+  // public_deps are included when check_includes_strict is set.
+  const ResolvedTargetDeps& target_deps = resolved->GetTargetDeps(target);
+  std::vector<OutputFile> deps;
+  AppendHardDepsOutputsForDeps(
+      target,
+      target->check_includes_strict() && !target->hard_dep()
+          ? target_deps.public_deps()
+          : target_deps.linked_deps(),
+      *resolved, &deps);
+
+  PathOutput path_output(build_settings->build_dir(),
+                         build_settings->root_path_utf8(), ESCAPE_NINJA);
+
+  // The deps are regular inputs instead of order-only deps so that actions,
+  // which have an implicit dependency on their hard deps, become dirty if
+  // one of their recursive hard deps changes. Everything else refers to this
+  // rule through an order-only dep.
+  out << "build ";
+  path_output.WriteFile(out, output);
+  if (build_settings->no_stamp_files()) {
+    out << ": " << BuiltinTool::kBuiltinToolPhony;
+  } else {
+    out << ": " << GetNinjaRulePrefixForToolchain(target->settings())
+        << GeneralTool::kGeneralToolStamp;
+  }
+  path_output.WriteFiles(out, deps);
+  out << std::endl;
 }
 
 void NinjaTargetWriter::WriteEscapedSubstitution(const Substitution* type) {
@@ -541,13 +654,30 @@ NinjaTargetWriter::WriteInputDepsStampOrPhonyAndGetDep(
   // Hard dependencies that are direct or indirect dependencies.
   // These are large (up to 100s), hence why we check other
   const TargetSet& hard_deps = resolved().GetHardDeps(target_);
-  for (const Target* target : hard_deps) {
+  std::vector<OutputFile> hard_deps_outputs;
+  if (target_->output_type() == Target::CREATE_BUNDLE) {
     // BUNDLE_DATA should normally be treated as a data-only dependency
     // (see Target::IsDataOnly()). Only the CREATE_BUNDLE target, that actually
     // consumes this data, needs to have the BUNDLE_DATA as an input dependency.
-    if (target->output_type() != Target::BUNDLE_DATA ||
-        target_->output_type() == Target::CREATE_BUNDLE)
+    // So list all hard deps directly for CREATE_BUNDLE targets.
+    for (const Target* target : hard_deps)
       input_deps_targets.push_back(target);
+  } else {
+    // For everything else, depend on the (at most one) file that in turn
+    // depends on all hard deps that aren't BUNDLE_DATA, to not write
+    // thousands of hard deps for every target.
+    AppendHardDepsOutputs(target_, resolved(), &hard_deps_outputs);
+    if (target_->check_includes_strict() && !target_->hard_dep()) {
+      // When check_includes_strict is enabled, GetHardDeps(target_) and
+      // <target>.harddeps only include hard deps from public_deps so that
+      // private hard deps are not forwarded to dependents. However, compiling
+      // this target's own sources may still #include generated headers from
+      // its private_deps, so include their hard deps in this target's own
+      // input deps.
+      AppendHardDepsOutputsForDeps(
+          target_, resolved().GetTargetDeps(target_).private_deps(), resolved(),
+          &hard_deps_outputs);
+    }
   }
 
   // Additional hard dependencies passed in. These are usually empty or small,
@@ -575,7 +705,7 @@ NinjaTargetWriter::WriteInputDepsStampOrPhonyAndGetDep(
   // Write the outputs.
 
   if (input_deps_sources.empty() && input_deps_targets.empty() &&
-      toolchain_deps_targets.empty())
+      hard_deps_outputs.empty() && toolchain_deps_targets.empty())
     return InputDeps{};  // No input dependencies.
 
   InputDeps deps;
@@ -621,6 +751,8 @@ NinjaTargetWriter::WriteInputDepsStampOrPhonyAndGetDep(
         deps.push_back(dep->dependency_output());
     }
   };
+  deps.order_only.insert(deps.order_only.end(), hard_deps_outputs.begin(),
+                         hard_deps_outputs.end());
   add_target_deps(deps.order_only, input_deps_targets);
   add_target_deps(deps.implicit, toolchain_deps_targets);
 
