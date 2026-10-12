@@ -51,10 +51,7 @@ jobs:
           base: ${{ matrix.base }}
           labels: automated-sync
       - name: Enable auto-merge
-        if: >-
-          steps.create-pull-request.outputs.pull-request-number != '' &&
-          (steps.create-pull-request.outputs.pull-request-operation == 'created' ||
-           steps.create-pull-request.outputs.pull-request-operation == 'updated')
+        if: steps.create-pull-request.outputs.pull-request-number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.create-pull-request.outputs.pull-request-number }}
