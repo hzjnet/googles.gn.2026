@@ -1,3 +1,23 @@
+# Building and running code
+
+* Prefer to run `build/gen.py --debug` unless you need a release build.
+* **NEVER** run `ninja` without an explicit list of targets to build
+  * Build `gn_unittests` if you want to run unittests
+    * You can manually run them with a filter in the hot-path of the
+      development loop (eg. `./out/gn_unittests --gtest_filter=Functions.*`)
+  * Build `gn` if you want to run gn itself (but if you want to run it on
+    chromium, prefer building GN in a separate output directory with
+    `--release`, as the debug build is very slow on a project of chromium's
+    size).
+* Before uploading code, make sure to:
+  * Run the *full* test suite via building the target `run_tests`
+  * Run `tools/run_formatter.sh` to format the code
+  * Run `tools/update_reference.sh` to ensure documentation is up to date.
+  * If you changed rust code, also run `tools/run_linter.sh`
+* **NEVER** delete the build output directory without permission to fix build
+  errors. If you feel the need to do so, there is likely a *far* more
+  fundamental issue.
+
 # Rust Style Guidelines & Best Practices
 
 Please adhere to the following conventions and best practices when writing or
@@ -69,6 +89,18 @@ modifying Rust code in this repository:
 * **Crate Encapsulation**: Keep modules, structs, and fields private or
   `pub(crate)` by default to maintain clean boundaries. Only use `pub` for APIs
   that are intended to be consumed by other crates.
+
+## Building and testing
+
+* *NEVER* use cargo to build and test rust changes
+  * `cargo` commands are run for you as a part of `ninja`.
+* To build, use `ninja -C out gn/gn_unittests/rust_unittests` respectively,
+  depending on what you want to build.
+* To test a single test, run
+  `ninja -C out gn_unittests && out/gn_unittests --gtest_filter=prefix*`.
+* To run all unit tests, run `ninja -C out run_gn_unittests run_rust_unittests`
+* To perform tests that would be run on CQ, run `ninja -C out`
+  * Note: This also runs linter and formatter tests
 
 # C++ Style guidelines and best practices
 

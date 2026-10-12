@@ -7,6 +7,7 @@
 
 import argparse
 import os
+import pathlib
 import platform
 import re
 import shlex
@@ -258,8 +259,15 @@ def main(argv):
                     action='store_true',
                     help=('Generate compile_commands.json with ' +
                           '`ninja -t compdb`.'))
-  args_list.add('--starlark', action='store_true', default=False,
+  # TODO: Remove flag once this is no longer referenced by CI.
+  args_list.add('--starlark', action='store_true', default=True,
                     help='Enable (experimental) starlark integration')
+  args_list.add('--gen', default=None,
+                    metavar='SRC_DIR=OUT_DIR', dest='gen_target',
+                    help=('Generate ninja targets that invoke `gn gen` on an ' +
+                          'external repository.\n' +
+                          'Format: <src_dir>=<out_dir> ' +
+                          '(e.g. ~/chromium/src=out/Default)'))
 
   args_list.add_to_parser(parser)
   options = parser.parse_args(argv)
@@ -329,6 +337,17 @@ def GenerateLastCommitPosition(host, header):
       f.write(contents)
 
 
+USED_ENV_VARS = (
+    'AR',
+    'CFLAGS',
+    'CXX',
+    'CXXFLAGS',
+    'LD',
+    'LDFLAGS',
+    'LIBFLAGS',
+)
+
+
 def WriteGenericNinja(path, static_libraries, executables,
                       cxx, ar, ld, platform, host, options,
                       args_list, cflags=[], ldflags=[],
@@ -343,6 +362,20 @@ def WriteGenericNinja(path, static_libraries, executables,
 
   rel_self = os.path.relpath(os.path.join(SCRIPT_DIR, 'gen.py'), build_dir)
 
+  sys_exec = f'"{sys.executable}"' if host.is_windows() else shlex.quote(sys.executable)
+  cmd = '%s %s%s' % (sys_exec, rel_self, args)
+  explicit_env = [k for k in USED_ENV_VARS if k in os.environ]
+  if explicit_env:
+    if host.is_windows():
+      set_cmds = ['set "%s=%s"' % (k, os.environ[k].replace('$', '$$')) for k in explicit_env]
+      cmd = 'cmd.exe /s /c "%s && %s"' % (' && '.join(set_cmds), cmd)
+    else:
+      env_prefix = ' '.join(
+          '%s=%s' % (k, shlex.quote(os.environ[k]).replace('$', '$$'))
+          for k in explicit_env
+      )
+      cmd = '%s %s' % (env_prefix, cmd)
+
   ninja_header_lines = [
     'cxx = ' + cxx,
     'ar = ' + ar,
@@ -351,7 +384,7 @@ def WriteGenericNinja(path, static_libraries, executables,
     '  depth = 1',
     '',
     'rule regen',
-    '  command = %s %s%s' % (sys.executable, rel_self, args),
+    '  command = ' + cmd,
     '  description = Regenerating ninja files',
     '',
     'build build.ninja: regen',
@@ -443,28 +476,27 @@ def WriteGenericNinja(path, static_libraries, executables,
 
   ninja_lines.append('')  # Make sure the file ends with a newline.
 
-  if options.starlark:
-    starlark_common_args = {
-        'crate_dir': ninja.source_file('src/gn/starlark'),
-        'target_dir': 'starlark',
-        'cxxflags': ' '.join(cflags),
-        'ldflags': ' '.join(ldflags),
-    }
-    ninja.CargoLibTarget(
-        library_to_a('gn_starlark'),
-        cargo_flags='--features ninja',
-        **starlark_common_args,
-    )
-    rust_tests = ninja.CargoTestTarget(
-        'rust_unittests',
-        cargo_flags='--workspace --features ninja',
-        implicit_inputs=[
-            library_to_a('base'),
-            library_to_a('gn_lib'),
-            library_to_a('string_atom'),
-        ],
-        **starlark_common_args,
-    )
+  starlark_common_args = {
+      'crate_dir': ninja.source_file('src/gn/starlark'),
+      'target_dir': 'starlark',
+      'cxxflags': ' '.join(cflags),
+      'ldflags': ' '.join(ldflags),
+  }
+  ninja.CargoLibTarget(
+      library_to_a('gn_starlark'),
+      cargo_flags='--features ninja',
+      **starlark_common_args,
+  )
+  rust_tests = ninja.CargoTestTarget(
+      'rust_unittests',
+      cargo_flags='--workspace --features ninja',
+      implicit_inputs=[
+          library_to_a('base'),
+          library_to_a('gn_lib'),
+          library_to_a('string_atom'),
+      ],
+      **starlark_common_args,
+  )
 
   ninja.Phony(
       'run_tests',
@@ -475,15 +507,18 @@ def WriteGenericNinja(path, static_libraries, executables,
               args='--quiet',
           ),
           ninja.Phony(
-              'run_integration_tests', inputs=[ninja.IntegrationTest('simple')]
+              'run_integration_tests',
+              inputs=[
+                ninja.IntegrationTest('simple'),
+                ninja.IntegrationTest('starlark')
+              ],
           ),
-      ] + ([
           ninja.RunBinary(
               'run_rust_unittests',
               inputs=[rust_tests],
               args='--quiet',
           )
-      ] if options.starlark else []),
+      ],
   )
 
   ninja.Phony(
@@ -505,16 +540,24 @@ def WriteGenericNinja(path, static_libraries, executables,
               args='--diff',
               env=f'NOBUILD=1 NINJA_OUT_DIR={os.path.relpath(build_dir, REPO_ROOT)}',
           ),
-      ] + [
           ninja.CargoClippyTarget(
               'check_linter',
               cargo_flags='--workspace --all-targets',
               clippy_flags='-D warnings',
               **starlark_common_args,
           ),
-      ] if options.starlark else [],
+      ],
   )
 
+  if options.gen_target:
+    if '=' not in options.gen_target:
+      raise ValueError(f'Invalid --gen format: {repr(options.gen_target)}. Expected <src_dir>=<out_dir>')
+    gen_src_dir, gen_out_dir = options.gen_target.split('=', 1)
+    ninja.AddExternalGenTarget(
+      'gen',
+      pathlib.Path(os.path.expandvars(os.path.expanduser(gen_src_dir))).resolve(),
+      pathlib.Path(os.path.expandvars(gen_out_dir))
+    )
   with open(path, 'w') as f:
     f.write('\n'.join(ninja_header_lines))
     f.write(ninja_template)
@@ -745,6 +788,8 @@ def WriteGNNinja(path, platform, host, options, args_list):
         # Enable __cplusplus macro to report the correct C++ standard version,
         # otherwise it defaults to C++98.
         '/Zc:__cplusplus',
+        # Enable use of __VA_OPT__ in macros.
+        '/Zc:preprocessor',
         '/GR-',
         '/D_HAS_EXCEPTIONS=0',
     ])
@@ -807,6 +852,7 @@ def WriteGNNinja(path, platform, host, options, args_list):
               'src/gn/analyzer.cc',
               'src/gn/args.cc',
               'src/gn/binary_target_generator.cc',
+              'src/gn/build_file_editor.cc',
               'src/gn/build_settings.cc',
               'src/gn/builder.cc',
               'src/gn/builder_record.cc',
@@ -844,6 +890,8 @@ def WriteGNNinja(path, platform, host, options, args_list):
               'src/gn/deps_iterator.cc',
               'src/gn/desc_builder.cc',
               'src/gn/eclipse_writer.cc',
+              'src/gn/edit_subcommands.cc',
+              'src/gn/edit_command.cc',
               'src/gn/err.cc',
               'src/gn/escape.cc',
               'src/gn/exec_process.cc',
@@ -1005,8 +1053,10 @@ def WriteGNNinja(path, platform, host, options, args_list):
         'src/gn/config_unittest.cc',
         'src/gn/config_values_extractors_unittest.cc',
         'src/gn/desc_builder_unittest.cc',
+        'src/gn/edit_command_unittest.cc',
         'src/gn/escape_unittest.cc',
         'src/gn/exec_process_unittest.cc',
+        'src/gn/ffi/session_unittest.cc',
         'src/gn/filesystem_utils_unittest.cc',
         'src/gn/file_writer_unittest.cc',
         'src/gn/frameworks_utils_unittest.cc',
@@ -1159,12 +1209,8 @@ def WriteGNNinja(path, platform, host, options, args_list):
   executables['gn']['libs'].extend(static_libraries.keys())
   executables['gn_unittests']['libs'].extend(static_libraries.keys())
 
-  if options.starlark:
-    executables['gn_unittests']['sources'].extend([
-        'src/gn/ffi/session_unittest.cc',
-    ])
-    executables['gn_unittests']['libs'].append('gn_starlark')
-    executables['gn']['libs'].append('gn_starlark')
+  executables['gn_unittests']['libs'].append('gn_starlark')
+  executables['gn']['libs'].append('gn_starlark')
 
   # Write the absolute path of the source root to a file in the output directory
   # so that tests can locate the source tree robustly.

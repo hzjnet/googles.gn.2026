@@ -54,10 +54,11 @@ fn build_globals() -> Globals {
 impl Session {
     /// Creates a new `Session`.
     pub fn from_resolver(path_resolver: PathResolver) -> Self {
-        let loader = FileLoader::default();
-        loader.preload(rule::register_builtin_rules::<
-            crate::eval_context::EvalContext,
-        >());
+        let mut loader = FileLoader::default();
+        loader.preload(
+            Label::parse("//builtins:rules.scl", PackageRef::root()).unwrap(),
+            rule::register_builtin_rules::<crate::eval_context::EvalContext>(),
+        );
         Self {
             loader,
             path_resolver,
@@ -67,9 +68,10 @@ impl Session {
     }
 
     /// Associated function for C++ constructor.
-    pub fn new(source_root: &str, source_root_rel: &str) -> Box<Self> {
+    pub fn new(source_root: &str, build_root: &str, source_root_rel: &str) -> Box<Self> {
         Box::new(Self::from_resolver(PathResolver::new(
             std::path::PathBuf::from(source_root),
+            std::path::PathBuf::from(build_root),
             source_root_rel.to_owned(),
         )))
     }
@@ -77,6 +79,18 @@ impl Session {
     /// Associated function for C++ constructor.
     pub fn new_for_testing() -> Box<Self> {
         Box::new(Self::from_resolver(PathResolver::new_for_testing()))
+    }
+
+    pub fn loaded(&self) -> Vec<&'static str> {
+        self.loader
+            .loaded()
+            .into_iter()
+            .map(|label| {
+                self.path_resolver
+                    .source_file(label.package(), label.name())
+                    .as_str()
+            })
+            .collect()
     }
 
     pub(crate) fn register_target(&self, target: Target) -> crate::TargetRef {
@@ -115,11 +129,12 @@ impl Session {
         self.register_target(Target {
             cxx,
             starlark: None,
+            evaluated: Default::default(),
         })
         .0
     }
 
-    fn load(&'static self, label: LabelRef<'_>) -> starlark::Result<FrozenModule> {
+    pub(crate) fn load(&'static self, label: LabelRef<'_>) -> starlark::Result<FrozenModule> {
         self.loader
             .load(label, &self.path_resolver, &self.globals, &|pkg| {
                 // Safety: The package reference is guaranteed to live as long as the
@@ -150,9 +165,13 @@ impl Session {
                     .get(key)
                     .map_err(|_| Error::KeyNotFound(key.to_string(), label.clone()))?;
                 let mut cxx_value = crate::bridge::SetValue(scope.as_mut(), key, origin);
-                cxx_value
-                    .as_mut()
-                    .assign(value.value(), Some(value.owner()), settings, origin)?;
+                let owner = value.owner().to_owned();
+                cxx_value.as_mut().assign(
+                    value.as_ref().value(),
+                    Some(&owner),
+                    settings,
+                    origin,
+                )?;
             }
             Ok(())
         })());
