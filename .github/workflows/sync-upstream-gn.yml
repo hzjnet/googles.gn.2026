@@ -36,11 +36,8 @@ jobs:
         run: git fetch upstream --prune --tags
       - name: Merge upstream
         run: git merge --no-edit "${{ matrix.upstream }}"
-      - name: Push main
-        if: matrix.base == 'main'
-        run: git push origin "HEAD:refs/heads/${{ matrix.base }}"
       - name: Create Pull Request
-        if: matrix.base != 'main'
+        id: create-pull-request
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -53,3 +50,9 @@ jobs:
             Upstream branch: `${{ matrix.upstream }}`
           base: ${{ matrix.base }}
           labels: automated-sync
+      - name: Enable auto-merge
+        if: steps.create-pull-request.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.create-pull-request.outputs.pull-request-number }}
+        run: gh pr merge "$PR_NUMBER" --auto --merge
