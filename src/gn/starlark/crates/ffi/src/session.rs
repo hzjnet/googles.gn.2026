@@ -24,6 +24,7 @@ pub struct Session {
     pub(crate) path_resolver: PathResolver,
     globals: Globals,
     targets: RwLock<TargetMap>,
+    builtin_rules: Vec<&'static rule::Rule<'static, crate::eval_context::EvalContext>>,
 }
 
 fn make_attr_schema<'v>(
@@ -42,28 +43,35 @@ fn make_attr_schema<'v>(
     )
 }
 
-fn build_globals() -> Globals {
-    let mut builder = starlark::environment::GlobalsBuilder::standard();
-    builder.set("attr", attr::AttrModule { make_attr_schema });
-    providers::globals::register_providers(&mut builder);
-    depset::depset_globals!(&mut builder, crate::eval_context::EvalContext);
-    rule::register_rule_globals!(&mut builder, crate::eval_context::EvalContext);
-    builder.build()
-}
-
 impl Session {
     /// Creates a new `Session`.
     pub fn from_resolver(path_resolver: PathResolver) -> Self {
-        let mut loader = FileLoader::default();
+        let mut builder = starlark::environment::GlobalsBuilder::standard();
+        builder.set("attr", attr::AttrModule { make_attr_schema });
+        providers::globals::register_providers(&mut builder);
+        depset::depset_globals!(&mut builder, crate::eval_context::EvalContext);
+        rule::register_rule_globals!(&mut builder, crate::eval_context::EvalContext);
+
+        let mut loader: FileLoader = Default::default();
+        // Safety: The module lives as long as the loader lasts, which is as long as the session
+        // lasts, which is 'static.
+        let rules_module: &'static FrozenModule = unsafe {
+            extend_lifetime(loader.preload(
+                Label::parse("//builtins:rules.scl", PackageRef::root()).unwrap(),
+                rule::register_builtin_rules::<crate::eval_context::EvalContext>(),
+            ))
+        };
         loader.preload(
-            Label::parse("//builtins:rules.scl", PackageRef::root()).unwrap(),
-            rule::register_builtin_rules::<crate::eval_context::EvalContext>(),
+            Label::parse("//builtins:providers.scl", PackageRef::root()).unwrap(),
+            providers::builtin_providers_module(),
         );
+
         Self {
-            loader,
             path_resolver,
-            globals: build_globals(),
+            globals: builder.build(),
             targets: Default::default(),
+            builtin_rules: rule::extract_builtin_rules(rules_module),
+            loader,
         }
     }
 
@@ -112,7 +120,7 @@ impl Session {
             // rust_target from a C++ target at the same time.
             Entry::Occupied(e) => {
                 assert!(
-                    target.starlark.is_none(),
+                    target.rule.is_builtin(),
                     "Target already registered, or accessed via to_rust before registration"
                 );
                 // Safety: A target object in the map is never deleted and lives for the
@@ -128,7 +136,8 @@ impl Session {
     ) -> &'static Target {
         self.register_target(Target {
             cxx,
-            starlark: None,
+            rule: self.builtin_rules[cxx.output_type() as usize],
+            attrs: Vec::new(),
             evaluated: Default::default(),
         })
         .0
