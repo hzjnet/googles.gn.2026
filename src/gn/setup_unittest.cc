@@ -10,6 +10,7 @@
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/test/scoped_command_line.h"
 #include "gn/builder_record.h"
 #include "gn/commands.h"
 #include "gn/filesystem_utils.h"
@@ -642,6 +643,98 @@ script_executable = "//third_party/python/bin/python3"
           .NormalizePathSeparatorsTo('/'));
 }
 
+TEST_F(SetupTest, ScriptExecutableList) {
+  base::CommandLine cmdline(base::CommandLine::NO_PROGRAM);
+
+  const char kDotfileContents[] = R"(
+buildconfig = "//BUILDCONFIG.gn"
+script_executable = [ "//third_party/python/bin/python3", "-s", "-B" ]
+)";
+
+  base::ScopedTempDir in_temp_dir;
+  base::FilePath in_path = CreateSourceRoot(&in_temp_dir, kDotfileContents);
+  cmdline.AppendSwitchPath(switches::kRoot, in_path);
+
+  base::FilePath build_dir = in_path.Append(FILE_PATH_LITERAL("out"))
+                                 .Append(FILE_PATH_LITERAL("default"));
+
+  Setup setup;
+  Err err;
+  ASSERT_TRUE(
+      setup.DoSetupWithErr(FilePathToUTF8(build_dir), true, cmdline, &err));
+  EXPECT_TRUE(setup.build_settings().python_path_is_relative_to_build_dir());
+  EXPECT_EQ(
+      setup.build_settings().python_path(),
+      base::FilePath(FILE_PATH_LITERAL("../../third_party/python/bin/python3"))
+          .NormalizePathSeparatorsTo('/'));
+  std::vector<std::string> expected_args = {"-s", "-B"};
+  EXPECT_EQ(setup.build_settings().python_args(), expected_args);
+}
+
+TEST_F(SetupTest, ScriptExecutableEmptyList) {
+  base::CommandLine cmdline(base::CommandLine::NO_PROGRAM);
+
+  const char kDotfileContents[] = R"(
+buildconfig = "//BUILDCONFIG.gn"
+script_executable = []
+)";
+
+  base::ScopedTempDir in_temp_dir;
+  base::FilePath in_path = CreateSourceRoot(&in_temp_dir, kDotfileContents);
+  cmdline.AppendSwitchPath(switches::kRoot, in_path);
+
+  base::ScopedTempDir build_temp_dir;
+  ASSERT_TRUE(build_temp_dir.CreateUniqueTempDir());
+
+  Setup setup;
+  Err err;
+  ASSERT_TRUE(setup.DoSetupWithErr(FilePathToUTF8(build_temp_dir.GetPath()),
+                                   true, cmdline, &err));
+  EXPECT_TRUE(setup.build_settings().python_path().empty());
+  EXPECT_TRUE(setup.build_settings().python_args().empty());
+}
+
+TEST_F(SetupTest, ScriptExecutableInvalidValues) {
+  RunDotfileErrorTest(
+      "buildconfig = \"//BUILDCONFIG.gn\"\n"
+      "script_executable = 42\n",
+      "script_executable must be a string or a list of strings.");
+  RunDotfileErrorTest(
+      "buildconfig = \"//BUILDCONFIG.gn\"\n"
+      "script_executable = [ \"//bin/python3\", 42 ]\n",
+      "This is not a string.");
+  RunDotfileErrorTest(
+      "buildconfig = \"//BUILDCONFIG.gn\"\n"
+      "script_executable = [ \"\", \"-s\" ]\n",
+      "Executable path in script_executable list cannot be empty.");
+}
+
+TEST_F(SetupTest, ScriptExecutableSwitchOverridesList) {
+  base::CommandLine cmdline(base::CommandLine::NO_PROGRAM);
+
+  const char kDotfileContents[] = R"(
+buildconfig = "//BUILDCONFIG.gn"
+script_executable = [ "//third_party/python/bin/python3", "-s" ]
+)";
+
+  base::ScopedTempDir in_temp_dir;
+  base::FilePath in_path = CreateSourceRoot(&in_temp_dir, kDotfileContents);
+
+  cmdline.AppendSwitchPath(switches::kRoot, in_path);
+  cmdline.AppendSwitch(switches::kScriptExecutable, "//bin/python3");
+
+  base::FilePath build_dir = in_path.Append(FILE_PATH_LITERAL("out"));
+
+  Setup setup;
+  Err err;
+  ASSERT_TRUE(
+      setup.DoSetupWithErr(FilePathToUTF8(build_dir), true, cmdline, &err));
+  EXPECT_EQ(setup.build_settings().python_path(),
+            base::FilePath(FILE_PATH_LITERAL("../bin/python3"))
+                .NormalizePathSeparatorsTo('/'));
+  EXPECT_TRUE(setup.build_settings().python_args().empty());
+}
+
 TEST_F(SetupTest, HostOsAndHostCpuInDotFile) {
   base::CommandLine cmdline(base::CommandLine::NO_PROGRAM);
 
@@ -669,25 +762,6 @@ if (host_os != "nonexistent_os") {
       setup.DoSetupWithErr(FilePathToUTF8(build_dir), true, cmdline, &err));
   EXPECT_FALSE(err.has_error());
 }
-
-// Convenience class to save the current process base::CommandLine
-// on construction, modify it through the get() method, then restore
-// the saved version on scope exit. This is useful for tests that need
-// to modify the process global singleton temporarily.
-class ScopedCommandLineForTest {
- public:
-  ScopedCommandLineForTest()
-      : command_line_ref_(*base::CommandLine::ForCurrentProcess()),
-        saved_command_line_(command_line_ref_) {}
-
-  ~ScopedCommandLineForTest() { command_line_ref_ = saved_command_line_; }
-
-  base::CommandLine& get() { return command_line_ref_; }
-
- private:
-  base::CommandLine& command_line_ref_;
-  base::CommandLine saved_command_line_;
-};
 
 // A test that verifies that generated_file() generation doesn't crash.
 // See the commands in builder_record.h regarding metadata walks
@@ -724,7 +798,7 @@ class ScopedCommandLineForTest {
 // i.e. that metadata collection was done properly, even if it was delayed.
 TEST(GenCommandTest, ValidationMetadataRace) {
   MsgLoop msg_loop;
-  ScopedCommandLineForTest global_cmdline;
+  base::test::ScopedCommandLine global_cmdline;
 
   base::ScopedTempDir in_temp_dir;
   base::FilePath in_path =
@@ -783,10 +857,12 @@ group("default") {
   base::ScopedTempDir build_temp_dir;
   ASSERT_TRUE(build_temp_dir.CreateUniqueTempDir());
 
-  global_cmdline.get().AppendSwitchPath(switches::kRoot, in_path);
-  global_cmdline.get().AppendSwitch(switches::kFailOnUnusedArgs);
-  global_cmdline.get().AppendSwitch(switches::kQuiet);
-  global_cmdline.get().AppendSwitch(switches::kThreads, "4");
+  global_cmdline.GetProcessCommandLine()->AppendSwitchPath(switches::kRoot,
+                                                           in_path);
+  global_cmdline.GetProcessCommandLine()->AppendSwitch(
+      switches::kFailOnUnusedArgs);
+  global_cmdline.GetProcessCommandLine()->AppendSwitch(switches::kQuiet);
+  global_cmdline.GetProcessCommandLine()->AppendSwitch(switches::kThreads, "4");
 
   std::vector<std::string> args;
   args.push_back(FilePathToUTF8(build_temp_dir.GetPath()));
@@ -819,7 +895,7 @@ group("default") {
 // proper checks.
 TEST(GenCommandTest, ValidationMetadataRaceMissingTarget) {
   MsgLoop msg_loop;
-  ScopedCommandLineForTest global_cmdline;
+  base::test::ScopedCommandLine global_cmdline;
 
   base::ScopedTempDir in_temp_dir;
   base::FilePath in_path =
@@ -886,10 +962,12 @@ group("default") {
   base::ScopedTempDir build_temp_dir;
   ASSERT_TRUE(build_temp_dir.CreateUniqueTempDir());
 
-  global_cmdline.get().AppendSwitchPath(switches::kRoot, in_path);
-  global_cmdline.get().AppendSwitch(switches::kFailOnUnusedArgs);
-  global_cmdline.get().AppendSwitch(switches::kQuiet);
-  global_cmdline.get().AppendSwitch(switches::kThreads, "4");
+  global_cmdline.GetProcessCommandLine()->AppendSwitchPath(switches::kRoot,
+                                                           in_path);
+  global_cmdline.GetProcessCommandLine()->AppendSwitch(
+      switches::kFailOnUnusedArgs);
+  global_cmdline.GetProcessCommandLine()->AppendSwitch(switches::kQuiet);
+  global_cmdline.GetProcessCommandLine()->AppendSwitch(switches::kThreads, "4");
 
   std::vector<std::string> args;
   args.push_back(FilePathToUTF8(build_temp_dir.GetPath()));
@@ -913,3 +991,145 @@ group("default") {
     EXPECT_EQ(output_items[2].decoration, DECORATION_NONE);
   }
 }
+
+namespace {
+
+int RunGenForWalkDepsTest(const base::FilePath& in_path,
+                          const base::FilePath& build_path,
+                          const std::string& walk_deps) {
+  WriteFile(in_path.Append(FILE_PATH_LITERAL(".gn")),
+            "buildconfig = \"//BUILDCONFIG.gn\"\n");
+  WriteFile(in_path.Append(FILE_PATH_LITERAL("BUILDCONFIG.gn")),
+            "set_default_toolchain(\"//:toolchain\")\n");
+  WriteFile(in_path.Append(FILE_PATH_LITERAL("script.py")), "");
+  WriteFile(in_path.Append(FILE_PATH_LITERAL("BUILD.gn")), R"(
+toolchain("toolchain") {
+  tool("stamp") {
+    command = "touch {{output}}"
+  }
+}
+action("pickle") {
+  script = "//script.py"
+  outputs = [ "$target_gen_dir/foo.pickle" ]
+  metadata = {
+    pickle_files = [ "$target_gen_dir/foo.pickle" ]
+  }
+}
+group("lib") {
+  deps = [ ":pickle" ]
+}
+generated_file("pickles") {
+  outputs = [ "$target_gen_dir/pickles.txt" ]
+  data_keys = [ "pickle_files" ]
+  rebase = root_build_dir
+  walk_deps = )" + walk_deps + R"(
+}
+action("final") {
+  script = "//script.py"
+  outputs = [ "$target_gen_dir/final.txt" ]
+  inputs = [ "$target_gen_dir/pickles.txt" ]
+  deps = [ ":pickles" ]
+}
+group("app") {
+  deps = [ ":final", ":lib" ]
+}
+)");
+
+  base::test::ScopedCommandLine global_cmdline;
+  base::CommandLine* cmdline = global_cmdline.GetProcessCommandLine();
+  cmdline->AppendSwitchPath(switches::kRoot, in_path);
+  cmdline->AppendSwitch(switches::kQuiet);
+  MsgLoop msg_loop;
+  return commands::RunGen({FilePathToUTF8(build_path)});
+}
+
+}  // namespace
+
+// Tests that walk_deps can form a cycle with deps without becoming
+// dependencies of the generated_file(), and that undefined walk_deps targets
+// are rejected.
+TEST(GenCommandTest, WalkDeps) {
+  base::ScopedTempDir in_temp_dir;
+  ASSERT_TRUE(in_temp_dir.CreateUniqueTempDir());
+  base::FilePath in_path = base::MakeAbsoluteFilePath(in_temp_dir.GetPath());
+  base::ScopedTempDir build_temp_dir;
+  ASSERT_TRUE(build_temp_dir.CreateUniqueTempDir());
+  const base::FilePath& build_path = build_temp_dir.GetPath();
+
+  EXPECT_EQ(0, RunGenForWalkDepsTest(in_path, build_path, "[ \":app\" ]"));
+  EXPECT_EQ("gen/foo.pickle\n",
+            ReadFile(build_path.Append(FILE_PATH_LITERAL("gen/pickles.txt"))));
+  std::string ninja =
+      ReadFile(build_path.Append(FILE_PATH_LITERAL("toolchain.ninja")));
+  EXPECT_NE(std::string::npos,
+            ninja.find("build phony/pickles: phony gen/pickles.txt\n"))
+      << ninja;
+
+  // Undefined target in walk_deps fails resolution.
+  ScopedBufferedOutput buffered_out;
+  EXPECT_NE(0, RunGenForWalkDepsTest(in_path, build_path, "[ \":missing\" ]"));
+
+  std::string output;
+  for (const auto& item : buffered_out.GetItems())
+    output += item.output;
+  EXPECT_NE(std::string::npos, output.find("needs //:missing(//:toolchain)"))
+      << output;
+}
+
+#if !defined(OS_WIN)
+TEST(GenCommandTest, ScriptExecutableList) {
+  MsgLoop msg_loop;
+  base::test::ScopedCommandLine global_cmdline;
+
+  base::ScopedTempDir in_temp_dir;
+  base::FilePath in_path =
+      CreateSourceRoot(&in_temp_dir,
+                       "buildconfig = \"//BUILDCONFIG.gn\"\n"
+                       "script_executable = [ \"python3\", \"-s\" ]\n",
+                       kToolchainBuildConfig);
+
+  WriteFile(in_path.Append(FILE_PATH_LITERAL("check_no_user_site.py")),
+            "import sys\n"
+            "assert sys.flags.no_user_site == 1\n"
+            "if len(sys.argv) > 1:\n"
+            "  with open(sys.argv[1] + '.checked', 'w') as f:\n"
+            "    f.write('ok')\n"
+            "else:\n"
+            "  print(sys.flags.no_user_site)\n");
+
+  WriteFile(in_path.Append(FILE_PATH_LITERAL("BUILD.gn")),
+            R"(
+toolchain("toolchain") {
+  tool("stamp") {
+    command = "touch {{output}}"
+  }
+}
+
+val = exec_script("check_no_user_site.py", [], "trim string")
+assert(val == "1")
+
+action("act") {
+  script = "check_no_user_site.py"
+  outputs = [ "$target_out_dir/act.out" ]
+}
+)");
+
+  base::ScopedTempDir build_temp_dir;
+  ASSERT_TRUE(build_temp_dir.CreateUniqueTempDir());
+
+  base::CommandLine* cmdline = global_cmdline.GetProcessCommandLine();
+  cmdline->AppendSwitchPath(switches::kRoot, in_path);
+  cmdline->AppendSwitch(switches::kQuiet);
+  cmdline->AppendSwitch("ninja-outputs-file", "outputs.json");
+  cmdline->AppendSwitch("ninja-outputs-script", "//check_no_user_site.py");
+
+  std::vector<std::string> args = {FilePathToUTF8(build_temp_dir.GetPath())};
+  EXPECT_EQ(0, commands::RunGen(args));
+
+  EXPECT_EQ("ok", ReadFile(build_temp_dir.GetPath().Append(
+                      FILE_PATH_LITERAL("outputs.json.checked"))));
+  std::string toolchain_ninja = ReadFile(
+      build_temp_dir.GetPath().Append(FILE_PATH_LITERAL("toolchain.ninja")));
+  EXPECT_TRUE(toolchain_ninja.contains("command = python3 -s "));
+}
+#endif  // !defined(OS_WIN)
