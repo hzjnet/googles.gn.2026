@@ -518,7 +518,7 @@ def WriteGNNinja(path, platform, host, options, args_list):
         ldflags.append('-Wl,--gc-sections')
 
       # Omit all symbol information from the output file.
-      if options.no_strip is None:
+      if not options.no_strip:
         if platform.is_darwin():
           ldflags.append('-Wl,-S')
         elif platform.is_aix():
@@ -700,7 +700,6 @@ def WriteGNNinja(path, platform, host, options, args_list):
               'src/base/logging.cc',
               'src/base/md5.cc',
               'src/base/memory/ref_counted.cc',
-              'src/base/memory/weak_ptr.cc',
               'src/base/sha1.cc',
               'src/base/sha2.cc',
               'src/base/strings/string_number_conversions.cc',
@@ -898,7 +897,6 @@ def WriteGNNinja(path, platform, host, options, args_list):
               'src/util/sys_info.cc',
               'src/util/ticks.cc',
               'src/util/worker_pool.cc',
-              'src/gn/test_with_scope.cc',
           ]
       },
   }
@@ -1002,6 +1000,7 @@ def WriteGNNinja(path, platform, host, options, args_list):
         'src/gn/target_unittest.cc',
         'src/gn/template_unittest.cc',
         'src/gn/test_with_scheduler.cc',
+        'src/gn/test_with_scope.cc',
         'src/gn/tokenizer_unittest.cc',
         'src/gn/unique_vector_unittest.cc',
         'src/gn/value_unittest.cc',
