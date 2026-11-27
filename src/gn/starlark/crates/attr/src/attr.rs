@@ -5,25 +5,27 @@
 use std::fmt;
 
 use allocative::Allocative;
+use either::Either;
+use providers::FileTarget;
 use starlark::{
     collections::{SmallMap, SmallSet},
     values::{Freeze, Heap, UnpackValue as _, Value, list::UnpackList, none::NoneOr},
 };
-use types::{File, Label, LabelRef, PackageRef, PathResolver};
+use types::{Label, LabelRef, PackageRef, PathResolver};
 
 use crate::{
     allow_files::AllowFiles,
     schema::{AttrKind, AttrSchema},
 };
 
-/// A Starlark value that can be either a target `Label` or a source `File`.
+/// A Starlark value that can be either a target `Label` or a source `FileTarget`.
 ///
 /// We do this because at the time we resolve attributes, the dependency has
 /// not yet been resolved, and thus we don't know what files it expands to.
 #[derive(Allocative, Clone, Debug, Eq, Freeze, Hash, PartialEq)]
 pub enum LabelOrFile {
     Label(Label),
-    File(File),
+    File(FileTarget),
 }
 
 impl LabelOrFile {
@@ -250,48 +252,25 @@ impl Attr {
         }
     }
 
-    /// Collects dependencies contained within this attribute value to `out`.
-    pub fn add_dependencies<'a>(
+    /// Returns an iterator over every dependency `(label, toolchain)` in this
+    /// attribute in the same traversal order used when resolving attributes.
+    pub fn dependencies<'a>(
         &'a self,
         toolchain: LabelRef<'a>,
-        out: &mut SmallSet<(LabelRef<'a>, LabelRef<'a>)>,
-    ) {
+    ) -> impl Iterator<Item = (LabelRef<'a>, LabelRef<'a>)> + 'a {
+        // We use Either for each of these 4 cases because the concrete types are different.
         match self {
-            Self::Label(Some(LabelOrFile::Label(lbl))) => {
-                out.insert((lbl.as_ref(), toolchain));
-            },
-            Self::LabelList(list) => {
-                for lf in list {
-                    if let LabelOrFile::Label(lbl) = lf {
-                        out.insert((lbl.as_ref(), toolchain));
-                    }
-                }
-            },
-            Self::LabelKeyedStringDict(dict) => {
-                for (lf, _) in dict {
-                    if let LabelOrFile::Label(lbl) = lf {
-                        out.insert((lbl.as_ref(), toolchain));
-                    }
-                }
-            },
-            Self::StringKeyedLabelDict(dict) => {
-                for (_, lf) in dict {
-                    if let LabelOrFile::Label(lbl) = lf {
-                        out.insert((lbl.as_ref(), toolchain));
-                    }
-                }
-            },
-            Self::LabelListDict(dict) => {
-                for (_, list) in dict {
-                    for lf in list {
-                        if let LabelOrFile::Label(lbl) = lf {
-                            out.insert((lbl.as_ref(), toolchain));
-                        }
-                    }
-                }
-            },
-            _ => {},
+            Self::Label(Some(lf)) => Either::Left(Either::Left(std::slice::from_ref(lf).iter())),
+            Self::LabelList(list) => Either::Left(Either::Left(list.iter())),
+            Self::LabelKeyedStringDict(dict) => Either::Left(Either::Right(dict.keys())),
+            Self::StringKeyedLabelDict(dict) => Either::Right(Either::Left(dict.values())),
+            Self::LabelListDict(dict) => Either::Right(Either::Right(dict.values().flatten())),
+            _ => Either::Left(Either::Left([].iter())),
         }
+        .filter_map(move |lf| match lf {
+            LabelOrFile::Label(lbl) => Some((lbl.as_ref(), toolchain)),
+            LabelOrFile::File(_) => None,
+        })
     }
 }
 
@@ -385,11 +364,10 @@ mod tests {
 
         starlark::values::Heap::temp(|heap| {
             // Test a valid file "file.cc" (exists in testdata/foo/file.cc)
+            let (file, pkg_range) = path_resolver.existing_source_file(pkg, "file.cc").unwrap();
             assert_eq!(
                 Attr::create(&schema, Some(heap.alloc("file.cc")), pkg, &path_resolver,).unwrap(),
-                Attr::Label(Some(LabelOrFile::File(
-                    path_resolver.existing_source_file(pkg, "file.cc").unwrap()
-                )))
+                Attr::Label(Some(LabelOrFile::File(FileTarget::new(file, pkg_range))))
             );
 
             // Test an invalid file "file.h" (extension not in allowed list)
