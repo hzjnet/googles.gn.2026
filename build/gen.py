@@ -568,12 +568,16 @@ def WriteGNNinja(path, platform, host, options, args_list):
     ])
 
     if is_gcc(cxx):
-      cflags.append('-Wno-redundant-move')
       # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=104336
       cflags.append('-Wno-restrict')
     # flags not supported by gcc/g++.
     else:
-      cflags.extend(['-Wrange-loop-analysis', '-Wextra-semi-stmt'])
+      cflags.extend([
+          '-Wextra-semi-stmt',
+          '-Wrange-loop-analysis',
+          '-Wunneeded-member-function',
+          '-Wunused-member-function',
+      ])
       # We use "extern C" to communicate with rust, not C. So it doesn't matter
       # if the return type is an invalid C type.
       cflags.append('-Wno-return-type-c-linkage')
@@ -585,10 +589,7 @@ def WriteGNNinja(path, platform, host, options, args_list):
         ldflags.append('-static-libstdc++')
 
       cflags.extend([
-        '-Wno-deprecated-copy',
         '-Wno-implicit-fallthrough',
-        '-Wno-redundant-move',
-        '-Wno-unused-variable',
         '-Wno-format',             # Use of %llx, which is supported by _UCRT, false positive
         '-Wno-strict-aliasing',    # Dereferencing punned pointer
         '-Wno-cast-function-type', # Casting FARPROC to RegDeleteKeyExPtr
@@ -709,7 +710,6 @@ def WriteGNNinja(path, platform, host, options, args_list):
               'src/base/strings/stringprintf.cc',
               'src/base/strings/utf_string_conversion_utils.cc',
               'src/base/strings/utf_string_conversions.cc',
-              'src/base/timer/elapsed_timer.cc',
               'src/base/value_iterators.cc',
               'src/base/values.cc',
           ]
